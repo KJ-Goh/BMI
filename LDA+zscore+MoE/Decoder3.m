@@ -1,0 +1,107 @@
+
+clear; 
+clc; 
+close all;
+load('monkeydata_training.mat'); 
+
+colors = lines(8); 
+[num_trials, num_dir] = size(trial);
+n_train = round(0.8*num_trials);% 80% training set
+
+for d = 1:num_dir %for each direction
+    idx = randperm(num_trials);
+    train_data(:,d) = trial(idx(1:n_train), d);
+    test_data(:,d)  = trial(idx(n_train+1:end), d);
+end
+
+%Training model
+fprintf('Training...\n');
+tic;
+model = train_moe_model(train_data);
+fprintf('Train Time: %.2f s\n', toc);
+
+fprintf('Testing...\n');
+RMSE = 0; 
+n_p = 0; %number of point
+rmse_dir = zeros(1, size(test_data, 2));
+np_dir = zeros(1, size(test_data, 2));
+classifier_correct = 0;
+classifier_total = 0;
+figure('Color','w','Name','Multi-direction Trajectories');
+hold on; 
+grid on;
+
+%tr:try
+for angle = 1:size(test_data, 2)
+    for tr = 1:size(test_data, 1)
+        current = test_data(tr, angle);
+        T_end = size(current.spikes, 2);
+        
+        % Predict direction from first 320 ms
+        spikes_320 = current.spikes(:, 1:320);
+        pred_dir = predict_direction_classifier(spikes_320, model.classifier);
+        
+        if pred_dir == angle
+            classifier_correct = classifier_correct + 1;
+        end
+        classifier_total = classifier_total + 1;
+        % Select expert using predicted direction
+        expert = model.expert(pred_dir);
+
+        x = expert.m0;
+        P = expert.P0;
+        %e:expect t:true
+        ex = []; ey = []; tx = []; ty = [];
+        
+        for i = 1:(320/20)
+            idx_start = (i-1)*20 + 1;
+            idx_end = i*20;
+            z = sum(current.spikes(:, idx_start:idx_end), 2);
+            [x, P] = kalman(x, P, z, expert);
+        end
+
+        % First decoded point at 320 ms
+        ex = [ex, x(1)];
+        ey = [ey, x(2)];
+        tx = [tx, current.handPos(1,320)/10];
+        ty = [ty, current.handPos(2,320)/10];
+
+        % Continue decoding every 20 ms
+        for t = 340:20:T_end
+            z = sum(current.spikes(:, t-19:t), 2);
+            [x, P] = kalman(x, P, z, expert);
+
+            ex = [ex, x(1)];
+            ey = [ey, x(2)];
+            tx = [tx, current.handPos(1,t)/10];
+            ty = [ty, current.handPos(2,t)/10];
+        end
+        
+        err_now = sum((ex-tx).^2 + (ey-ty).^2);
+        RMSE = RMSE + err_now;
+        n_p = n_p + length(ex);
+        
+        rmse_dir(angle) = rmse_dir(angle) + err_now;
+        np_dir(angle) = np_dir(angle) + length(ex);
+        
+        if tr == 1 
+            plot(tx, ty, 'k--', 'LineWidth', 1, 'HandleVisibility', 'off'); 
+            p = plot(ex, ey, 'Color', colors(angle,:), 'LineWidth', 1.5);
+            p.DisplayName = ['Angle ' num2str(angle)];
+        end
+    end
+end
+xlabel('X Position (cm)'); 
+ylabel('Y Position (cm)');
+title('Hand Trajectory Decoding');
+legend('Location', 'northeastoutside');
+axis equal; 
+grid on;
+exportgraphics(gcf,'Hand Trajectory Decoding.png','Resolution',600);
+
+fprintf('Overall RMSE: %.4f cm\n', sqrt(RMSE/n_p));
+fprintf('Classification Accuracy: %.2f%%\n', 100 * classifier_correct / classifier_total);
+
+for k = 1:length(rmse_dir)
+    fprintf('Direction %d RMSE: %.4f cm\n', k, sqrt(rmse_dir(k)/np_dir(k)));
+end
